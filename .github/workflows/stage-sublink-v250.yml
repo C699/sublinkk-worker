@@ -135,7 +135,9 @@ jobs:
             target=codex-sublink-v250
           fi
           printf 'Publishing verified commit %s to %s\n' "$(git rev-parse HEAD)" "$target"
+          basic_auth=$(printf 'x-access-token:%s' "$GH_PUSH_TOKEN" | base64 -w0)
+          printf '::add-mask::%s\n' "$basic_auth"
           GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
-          GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer $GH_PUSH_TOKEN" \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $basic_auth" \
             git push origin "HEAD:refs/heads/$target"
