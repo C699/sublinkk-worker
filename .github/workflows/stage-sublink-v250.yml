@@ -1,0 +1,141 @@
+name: Stage Sublink Worker v2.5.0
+
+on:
+  push:
+    branches: [codex-stage-sublink-v250]
+    paths: [.github/workflows/stage-sublink-v250.yml]
+
+permissions:
+  contents: write
+
+concurrency: codex-sublink-v250
+
+jobs:
+  sync:
+    if: github.repository == 'C699/sublinkk-worker' && github.actor == 'C699'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    env:
+      RELEASE_PHASE: prepare
+      PREPARED_COMMIT: ''
+      ORIGINAL_MAIN: 3d33200e682b051eb5fc0e7a5538aa697a6a3dc9
+      UPSTREAM_BASE: 7dd3e5a04a4102049033620c07aa374ebebcf2d5
+      UPSTREAM_RELEASE: 173308861ee066e1b9378d270374c6dbd60c9c80
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - name: Assemble or verify the pinned release
+        shell: bash
+        run: |
+          set -euo pipefail
+          git init -q source
+          cd source
+          git remote add origin https://github.com/C699/sublinkk-worker.git
+          git fetch --no-tags origin refs/heads/main:refs/remotes/origin/main
+          [[ $(git rev-parse origin/main) == "$ORIGINAL_MAIN" ]]
+          git switch --detach "$ORIGINAL_MAIN"
+          if [[ "$RELEASE_PHASE" == publish ]]; then
+            [[ "$PREPARED_COMMIT" =~ ^[a-f0-9]{40}$ ]]
+            git fetch --no-tags origin refs/heads/codex-sublink-v250:refs/remotes/origin/codex-sublink-v250
+            [[ $(git rev-parse origin/codex-sublink-v250) == "$PREPARED_COMMIT" ]]
+            [[ $(git rev-parse "$PREPARED_COMMIT^") == "$ORIGINAL_MAIN" ]]
+            git diff --exit-code "$ORIGINAL_MAIN" "$PREPARED_COMMIT" -- .github/workflows wrangler.toml public
+            git switch --detach "$PREPARED_COMMIT"
+            exit 0
+          fi
+          [[ "$RELEASE_PHASE" == prepare ]]
+          git fetch --no-tags https://github.com/7Sageer/sublink-worker.git refs/tags/v2.5.0
+          [[ $(git rev-parse 'FETCH_HEAD^{commit}') == "$UPSTREAM_RELEASE" ]]
+          git diff --exit-code "$UPSTREAM_BASE" HEAD -- . ':(exclude).github/workflows' ':(exclude)wrangler.toml' ':(exclude)package.json'
+          git diff --binary "$UPSTREAM_BASE" "$UPSTREAM_RELEASE" -- . ':(exclude).github/workflows' ':(exclude)wrangler.toml' ':(exclude)package.json' | git apply --index
+          node --input-type=module <<'JS'
+          import { execFileSync } from 'node:child_process';
+          import { readFileSync, writeFileSync } from 'node:fs';
+          const current = JSON.parse(readFileSync('package.json', 'utf8'));
+          const released = JSON.parse(execFileSync('git', ['show', process.env.UPSTREAM_RELEASE + ':package.json'], { encoding: 'utf8' }));
+          if (current.name !== 'sublinkk-worker' || released.version !== '2.5.0') throw Error('Unexpected release');
+          released.name = current.name;
+          writeFileSync('package.json', JSON.stringify(released, null, 2) + '\n');
+          const lock = JSON.parse(readFileSync('package-lock.json', 'utf8'));
+          lock.name = lock.packages[''].name = current.name;
+          writeFileSync('package-lock.json', JSON.stringify(lock, null, 2) + '\n');
+          JS
+          cat > scripts/cloudflare-release.mjs <<'RELEASE_HELPER'
+          import { spawnSync } from 'node:child_process';
+          import { readFileSync, unlinkSync, writeFileSync } from 'node:fs';
+
+          const [mode = 'upload'] = process.argv.slice(2);
+          const namespace = process.env.SUBLINK_EXISTING_KV_ID;
+          if (!['check', 'upload', 'deploy'].includes(mode) || !/^[a-f0-9]{32}$/.test(namespace ?? '')) {
+            console.error('A valid existing SUBLINK_KV namespace is required. No Worker was uploaded.');
+            process.exit(1);
+          }
+
+          const source = readFileSync('wrangler.toml', 'utf8');
+          const binding = /(\bbinding\s*=\s*"SUBLINK_KV"\s*,\s*id\s*=\s*")[a-f0-9]{32}("\s*\})/g;
+          if (!/^name\s*=\s*"sublinkk-worker"\s*$/m.test(source) || [...source.matchAll(binding)].length !== 1) {
+            console.error('Unexpected Worker or KV config; refusing to change the existing binding.');
+            process.exit(1);
+          }
+
+          const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
+          const config = `.wrangler-release-${process.pid}.toml`;
+          const command = mode === 'upload' ? ['versions', 'upload'] : ['deploy'];
+          command.push('--keep-vars');
+          if (mode === 'check') command.push('--dry-run');
+          else command.push('--message', `Sublink Worker v${version}`);
+          const env = { ...process.env };
+          delete env.SUBLINK_EXISTING_KV_ID;
+
+          // Only the Cloudflare build gets the real namespace ID; it never enters Git history.
+          writeFileSync(config, source.replace(binding, (_, prefix, suffix) => prefix + namespace + suffix), {
+            flag: 'wx',
+            mode: 0o600,
+          });
+          try {
+            const result = spawnSync(process.execPath, ['node_modules/wrangler/bin/wrangler.js', ...command, '--config', config], {
+              env,
+              stdio: 'inherit',
+            });
+            if (result.error) console.error(result.error.message);
+            process.exitCode = result.status ?? 1;
+          } finally {
+            unlinkSync(config);
+          }
+          RELEASE_HELPER
+          git add package.json package-lock.json scripts/cloudflare-release.mjs
+          git diff --cached --check
+          git diff --cached --exit-code -- .github/workflows wrangler.toml public
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'Update Sublink Worker to v2.5.0'
+      - name: Check build, tests, and KV guard
+        working-directory: source
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm ci --no-fund --no-audit
+          npm run build
+          npm test
+          if env -u SUBLINK_EXISTING_KV_ID node scripts/cloudflare-release.mjs check; then
+            echo 'The release must fail closed without an existing KV namespace.' >&2
+            exit 1
+          fi
+          SUBLINK_EXISTING_KV_ID=11111111111111111111111111111111 node scripts/cloudflare-release.mjs check
+          git diff --exit-code
+      - name: Push only the verified source commit
+        working-directory: source
+        shell: bash
+        env:
+          GH_PUSH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          [[ $(git rev-parse HEAD^) == "$ORIGINAL_MAIN" ]]
+          if [[ "$RELEASE_PHASE" == publish ]]; then
+            [[ $(git rev-parse HEAD) == "$PREPARED_COMMIT" ]]
+            target=main
+          else
+            target=codex-sublink-v250
+          fi
+          printf 'Publishing verified commit %s to %s\n' "$(git rev-parse HEAD)" "$target"
+          GIT_CONFIG_COUNT=1 \
+          GIT_CONFIG_KEY_0=http.https://github.com/.extraheader \
+          GIT_CONFIG_VALUE_0="AUTHORIZATION: bearer $GH_PUSH_TOKEN" \
+            git push origin "HEAD:refs/heads/$target"
