@@ -1,4 +1,4 @@
-import { parseServerInfo, parseUrlParams, createTlsConfig, createTransportConfig, parseBool } from '../../utils.js';
+import { parseServerInfo, parseUrlParams, createTlsConfig, createTransportConfig, createUtlsConfig, parseBool } from '../../utils.js';
 
 export function parseVless(url) {
     const { addressPart, params, name } = parseUrlParams(url);
@@ -6,17 +6,17 @@ export function parseVless(url) {
     const { host, port } = parseServerInfo(serverInfo);
 
     const tls = createTlsConfig(params);
-    if (tls.reality) {
-        tls.utls = {
-            enabled: true,
-            fingerprint: 'chrome'
-        };
-    }
-    const transport = params.type !== 'tcp' ? createTransportConfig(params) : undefined;
+    // Reality needs a uTLS fingerprint, so fall back to chrome when the link has none.
+    const utls = tls.enabled ? createUtlsConfig(params.fp || (tls.reality ? 'chrome' : undefined)) : undefined;
+    if (utls) tls.utls = utls;
+    const transport = createTransportConfig(params);
 
-    // Parse UDP setting - primarily used for Clash output
-    // In sing-box, UDP is controlled by 'network' field, but we preserve this for Clash compatibility
+    // `udp` is a Clash-only flag; ClashConfigBuilder reads it, SingboxConfigBuilder strips it.
     const udp = params.udp !== undefined ? parseBool(params.udp) : undefined;
+
+    // VLESS post-quantum encryption (mlkem768x25519plus...); the server rejects
+    // clients that omit it, so it must survive conversion verbatim.
+    const encryption = params.encryption && params.encryption !== 'none' ? params.encryption : undefined;
 
     return {
         type: 'vless',
@@ -27,10 +27,8 @@ export function parseVless(url) {
         tcp_fast_open: false,
         tls,
         transport,
-        network: 'tcp',
         flow: params.flow ?? undefined,
-        // Include udp if explicitly specified - will be used for Clash output
-        // SingBoxConfigBuilder will strip this field for sing-box output
+        ...(encryption ? { encryption } : {}),
         ...(udp !== undefined ? { udp } : {})
     };
 }
