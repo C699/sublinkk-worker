@@ -16,8 +16,8 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 12
     env:
-      RELEASE_PHASE: prepare
-      PREPARED_COMMIT: ''
+      RELEASE_PHASE: publish
+      PREPARED_COMMIT: 87a4efd8b68c9ba07c80ac40cb9b09f96fda1a7d
       ORIGINAL_MAIN: 3d33200e682b051eb5fc0e7a5538aa697a6a3dc9
       UPSTREAM_BASE: 7dd3e5a04a4102049033620c07aa374ebebcf2d5
       UPSTREAM_RELEASE: 173308861ee066e1b9378d270374c6dbd60c9c80
